@@ -11,8 +11,8 @@ OmniSLA is a trustless Service Level Agreement enforcement framework built as a 
 | Network | GenLayer Bradbury Testnet |
 | RPC | https://rpc-bradbury.genlayer.com |
 | Deployer | 0x9F64879a55a0193e90d487EF4FA6D3123e71E6d7 |
-| Contract | 0xd840f9b16Dc0E513F4ab9E4724887b9c3C1D415C |
-| Explorer | https://explorer-bradbury.genlayer.com/address/0xd840f9b16Dc0E513F4ab9E4724887b9c3C1D415C |
+| Contract | 0xd4E0184D77aCc7107033D6b363924950424F7e4D |
+| Explorer | https://explorer-bradbury.genlayer.com/address/0xd4E0184D77aCc7107033D6b363924950424F7e4D |
 
 ---
 
