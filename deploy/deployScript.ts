@@ -10,16 +10,27 @@ import {
 import { localnet } from "genlayer-js/chains";
 
 export default async function main(client: GenLayerClient<any>) {
-  const filePath = path.resolve(process.cwd(), "contracts/football_bets.py");
+  const filePath = path.resolve(process.cwd(), "contracts/OmniSLA.py");
 
   try {
     const contractCode = new Uint8Array(readFileSync(filePath));
 
     await client.initializeConsensusSmartContract();
 
+    // Default deploy arguments for OmniSLA
     const deployTransaction = await client.deployContract({
       code: contractCode,
-      args: [],
+      args: [
+        client.account.address, // provider
+        client.account.address, // client
+        "https://status.openai.com", // target_url
+        1000, // collateral_required
+        500, // premium_required
+        "contains", // validation_strategy
+        "Operational", // validation_rule
+        3, // max_allowed_violations
+        "2026-12-31T23:59:59Z" // sla_end_time_iso
+      ],
     });
 
     const receipt = await client.waitForTransactionReceipt({
@@ -44,6 +55,7 @@ export default async function main(client: GenLayerClient<any>) {
 
     console.log(`Contract deployed at address: ${deployedContractAddress}`);
   } catch (error) {
-    throw new Error(`Error during deployment:, ${error}`);
+    throw new Error(`Error during deployment: ${error}`);
   }
 }
+
