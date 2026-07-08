@@ -1,6 +1,6 @@
 # OmniSLA -- Decentralized SLA Adjudication Contract
 
-OmniSLA is a trustless Service Level Agreement enforcement framework built as a GenLayer Intelligent Contract. It programmatically monitors web service endpoints through decentralized consensus, evaluates compliance using deterministic substring checks or LLM-based semantic analysis, and enforces financial penalties when providers breach their commitments.
+OmniSLA is a trustless Service Level Agreement enforcement framework built as a GenLayer Intelligent Contract. It monitors web service endpoints through decentralized consensus, evaluates compliance using deterministic substring checks or LLM-based semantic analysis, and enforces financial penalties when providers breach their commitments.
 
 ---
 
@@ -26,18 +26,19 @@ GenLayer solves this with the Equivalence Principle. OmniSLA uses `gl.vm.run_non
 
 2. **Validator Execution**: Each Validator independently runs `validate_check(leader_result)`. Validators perform their own web crawl and evaluation, then compare their structured verdict against the Leader's.
 
-3. **Deterministic Comparison**: To reach consensus despite natural LLM variability, validators compare only the deterministic fields:
-   - `condition_satisfied` -- whether the service is compliant
-   - `failure_category` -- Network, Server, Content, Semantic, or None
-   - `severity` -- None, Low, Medium, or High
+3. **Category Bucket Equivalence**: To handle cases where a Leader reports "Network" failure but a Validator reports "Server" failure (both indicating infrastructure problems), the contract groups categories into equivalence buckets:
+   - **pass**: None
+   - **infrastructure**: Network, Server
+   - **quality**: Content, Semantic
+   - **inconclusive**: Inconclusive
 
-   The `reason`, `evidence_summary`, and `confidence_pct` fields are informational and are not compared. This ensures consensus is achievable as long as validators agree on the factual outcome, regardless of minor phrasing differences.
+   Validators compare `condition_satisfied`, the category bucket (not the exact string), and `severity`. This makes consensus resilient to minor classification differences between nodes.
 
 ---
 
 ## Structured Verdict Format
 
-Every `check_sla()` call returns (and persists) a JSON verdict with this schema:
+Every `check_sla()` call returns and persists a JSON verdict:
 
 ```json
 {
@@ -53,35 +54,46 @@ Every `check_sla()` call returns (and persists) a JSON verdict with this schema:
 | Field | Type | Description |
 |---|---|---|
 | condition_satisfied | bool | Whether the SLA rule was met |
-| failure_category | string | None, Network, Server, Content, or Semantic |
+| failure_category | string | None, Network, Server, Content, Semantic, or Inconclusive |
 | severity | string | None, Low, Medium, or High |
-| confidence_pct | int | 0-100, confidence in the verdict (integer to avoid GenVM float encoding issues) |
-| reason | string | Short explanation of the decision |
-| evidence_summary | string | Summary of evidence from the crawled content |
+| confidence_pct | int | 0-100 confidence percentage (integer for GenVM compatibility) |
+| reason | string | Short explanation (truncated to 256 chars) |
+| evidence_summary | string | Evidence from crawled content (truncated to 512 chars) |
+
+### INCONCLUSIVE Verdict
+
+When the LLM returns malformed or unparseable output, the contract returns an INCONCLUSIVE verdict instead of a failure. INCONCLUSIVE verdicts:
+- Do NOT increment `failed_checks`
+- Do NOT increment `consecutive_failures`
+- Do NOT count toward slashing
+
+This prevents providers from being penalized for LLM infrastructure issues outside their control.
 
 ---
 
 ## Key Features
 
 - **Trustless Escrow**: Both provider (collateral) and client (premium) deposit funds. The contract activates only when both thresholds are met.
+- **Expiry Guard**: `check_sla()` reverts after the SLA end time, preventing stale checks.
 - **Spam Prevention**: A configurable `check_interval_seconds` cooldown blocks repeated instant checks.
-- **Consecutive Failure Policy**: Providers are not slashed on transient errors. Only `max_consecutive_failures` consecutive failures in a row trigger slashing.
-- **Structured Adjudication**: Verdicts contain category, severity, confidence, and evidence instead of bare booleans.
-- **Check Counters**: `total_checks`, `successful_checks`, and `failed_checks` provide a full audit trail.
-- **Prompt Injection Defense**: The semantic LLM prompt is hardened with explicit system instructions to treat webpage content as passive data and reject embedded override attempts.
-- **Constructor Validation**: Rejects invalid strategies, non-HTTP URLs, non-positive amounts, identical provider/client addresses, and malformed ISO dates at deployment time.
+- **Consecutive Failure Policy**: Only `max_consecutive_failures` consecutive real failures trigger slashing. Successful checks reset the counter.
+- **INCONCLUSIVE Handling**: Malformed LLM output does not penalize providers.
+- **Category Bucket Equivalence**: Validators use grouped category buckets for flexible consensus (Network/Server are treated as equivalent infrastructure failures).
+- **String Truncation**: `reason` (256 chars), `evidence_summary` (512 chars), and `body_str` (4096 chars) are truncated to prevent oversized on-chain storage.
+- **Normalized Timestamps**: ISO datetime strings are converted to unix timestamps at construction time via `_iso_to_timestamp`, avoiding repeated runtime parsing.
+- **Constructor Validation**: Rejects invalid strategies, non-HTTP URLs, non-positive amounts, identical provider/client addresses, and malformed ISO dates.
 
 ---
 
 ## Use Cases
 
-1. **Web Service SLA Monitor**: SaaS providers lock collateral against a status page endpoint. Heartbeat checks verify the page reports operational status. Consecutive violations trigger automatic slashing.
+1. **Web Service SLA Monitor**: SaaS providers lock collateral against a status page endpoint. Heartbeat checks verify the page reports operational status.
 
 2. **Oracle and Data Feed Compliance**: Off-chain data nodes lock collateral. The contract checks oracle feeds for freshness and structural correctness.
 
-3. **CDN and Hosting Availability**: Decentralized hosting providers lock collateral. Checks verify that index files contain expected content hashes or script patterns.
+3. **CDN and Hosting Availability**: Decentralized hosting providers lock collateral. Checks verify that index files contain expected content hashes.
 
-4. **AI/LLM API Quality Assurance**: Third-party AI API providers lock collateral. Semantic checks verify that API responses meet quality thresholds (response format, latency, correctness).
+4. **AI/LLM API Quality Assurance**: Third-party AI API providers lock collateral. Semantic checks verify that API responses meet quality thresholds.
 
 5. **Decentralized Job Execution Verification**: Computation workers update task status endpoints. OmniSLA monitors completion status, releasing escrow on success and slashing on timeouts.
 
@@ -95,7 +107,7 @@ contracts/
 tests/
   direct/
     conftest.py        -- Test fixtures and helpers
-    test_omni_sla.py   -- 21 in-memory unit tests
+    test_omni_sla.py   -- 24 in-memory unit tests
 deploy/
   deployScript.ts      -- Deployment logic
   runDeploy.ts         -- Standalone deployment runner
@@ -129,7 +141,7 @@ genvm-lint contracts/OmniSLA.py
 PYTHONPATH=. pytest tests/direct/ -v
 ```
 
-Expected output: 21 passed.
+Expected output: 24 passed.
 
 ---
 
@@ -147,7 +159,7 @@ Expected output: 21 passed.
 
 | Method | Access | Description |
 |---|---|---|
-| `check_sla()` | write | Trigger a consensus-verified health check, returns verdict JSON |
+| `check_sla()` | write | Trigger a consensus-verified health check; returns verdict JSON |
 | `close_sla()` | write | Provider collects payout after SLA expiry |
 
 ### Read-Only Queries

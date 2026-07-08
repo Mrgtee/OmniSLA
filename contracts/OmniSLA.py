@@ -1,7 +1,40 @@
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 from genlayer import *
 import json
-from datetime import datetime
+from datetime import datetime, timezone
+
+# Maximum lengths to prevent oversized on-chain storage
+MAX_BODY_LEN = 4096
+MAX_REASON_LEN = 256
+MAX_EVIDENCE_LEN = 512
+
+# Category buckets for flexible semantic equivalence.
+# Validators agree when their categories fall in the same bucket,
+# even if the exact category strings differ.
+CATEGORY_BUCKETS = {
+    "None": "pass",
+    "Network": "infrastructure",
+    "Server": "infrastructure",
+    "Content": "quality",
+    "Semantic": "quality",
+    "Inconclusive": "inconclusive",
+}
+
+def _category_bucket(category: str) -> str:
+    return CATEGORY_BUCKETS.get(category, category)
+
+def _truncate(s: str, limit: int) -> str:
+    if len(s) <= limit:
+        return s
+    return s[:limit - 3] + "..."
+
+def _iso_to_timestamp(iso_str: str) -> int:
+    """Parse an ISO datetime string to a unix timestamp (integer seconds)."""
+    dt = datetime.fromisoformat(iso_str)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
+
 
 class OmniSLA(gl.Contract):
     # Party addresses
@@ -17,6 +50,7 @@ class OmniSLA(gl.Contract):
     max_consecutive_failures: u256
     check_interval_seconds: u256
     sla_end_time_iso: str
+    sla_end_timestamp: u256
 
     # Escrow balances
     collateral_funded: u256
@@ -26,7 +60,6 @@ class OmniSLA(gl.Contract):
     status: str
 
     # Check tracking
-    last_check_datetime: str
     last_check_timestamp: u256
     total_checks: u256
     successful_checks: u256
@@ -66,7 +99,7 @@ class OmniSLA(gl.Contract):
         if int(check_interval_seconds) <= 0:
             raise gl.vm.UserError("Check interval must be positive")
         try:
-            datetime.fromisoformat(sla_end_time_iso)
+            end_ts = _iso_to_timestamp(sla_end_time_iso)
         except Exception:
             raise gl.vm.UserError("SLA end time must be a valid ISO format string")
 
@@ -78,11 +111,11 @@ class OmniSLA(gl.Contract):
         self.max_consecutive_failures = max_consecutive_failures
         self.check_interval_seconds = check_interval_seconds
         self.sla_end_time_iso = sla_end_time_iso
+        self.sla_end_timestamp = u256(end_ts)
 
         self.collateral_funded = u256(0)
         self.premium_funded = u256(0)
         self.status = "Created"
-        self.last_check_datetime = ""
         self.last_check_timestamp = u256(0)
         self.total_checks = u256(0)
         self.successful_checks = u256(0)
@@ -107,7 +140,6 @@ class OmniSLA(gl.Contract):
             "validation_strategy": self.validation_strategy,
             "validation_rule": self.validation_rule,
             "status": self.status,
-            "last_check_datetime": self.last_check_datetime,
             "last_check_timestamp": int(self.last_check_timestamp),
             "check_interval_seconds": int(self.check_interval_seconds),
             "total_checks": int(self.total_checks),
@@ -116,7 +148,8 @@ class OmniSLA(gl.Contract):
             "consecutive_failures": int(self.consecutive_failures),
             "max_consecutive_failures": int(self.max_consecutive_failures),
             "sla_end_time_iso": self.sla_end_time_iso,
-            "last_verdict_json": self.last_verdict_json
+            "sla_end_timestamp": int(self.sla_end_timestamp),
+            "last_verdict_json": self.last_verdict_json,
         }
         return json.dumps(details, sort_keys=True)
 
@@ -168,18 +201,21 @@ class OmniSLA(gl.Contract):
         if self.status != "Active":
             raise gl.vm.UserError("SLA is not Active")
 
-        # Prevent repeated instant spam checks
+        # Parse current transaction timestamp
         curr_dt_str = gl.message_raw['datetime']
-        curr_dt = datetime.fromisoformat(curr_dt_str)
-        curr_ts = int(curr_dt.timestamp())
+        curr_ts = _iso_to_timestamp(curr_dt_str)
 
+        # Block checks after SLA end time
+        if curr_ts >= int(self.sla_end_timestamp):
+            raise gl.vm.UserError("SLA monitoring period has expired")
+
+        # Prevent repeated instant spam checks
         if self.last_check_timestamp != u256(0):
             elapsed = curr_ts - int(self.last_check_timestamp)
             if elapsed < int(self.check_interval_seconds):
                 raise gl.vm.UserError("Check interval has not elapsed yet")
 
         self.last_check_timestamp = u256(curr_ts)
-        self.last_check_datetime = curr_dt_str
 
         # Capture validation config for closures (nondet block cannot access self)
         target_url = self.target_url
@@ -189,17 +225,12 @@ class OmniSLA(gl.Contract):
         # 1. Define non-deterministic block
         def execute_check() -> str:
             def _build_verdict(satisfied, category, severity, confidence_pct, reason, evidence):
-                """Build a canonical sorted-key JSON verdict string.
-
-                confidence_pct is an integer 0-100 (not a float) because
-                GenVM calldata encoding does not support Python floats.
-                """
                 return json.dumps({
                     "condition_satisfied": satisfied,
                     "confidence_pct": int(confidence_pct),
-                    "evidence_summary": str(evidence),
+                    "evidence_summary": _truncate(str(evidence), MAX_EVIDENCE_LEN),
                     "failure_category": str(category),
-                    "reason": str(reason),
+                    "reason": _truncate(str(reason), MAX_REASON_LEN),
                     "severity": str(severity),
                 }, sort_keys=True)
 
@@ -232,7 +263,10 @@ class OmniSLA(gl.Contract):
                         "Web response body is empty",
                         "Target endpoint returned HTTP 200 with empty body"
                     )
-                body_str = body_bytes.decode('utf-8', errors='ignore')
+                body_str = _truncate(
+                    body_bytes.decode('utf-8', errors='ignore'),
+                    MAX_BODY_LEN
+                )
             except Exception as e:
                 return _build_verdict(
                     False, "Network", "High", 100,
@@ -317,15 +351,15 @@ class OmniSLA(gl.Contract):
                     return _build_verdict(satisfied, category, severity, confidence_pct, reason, evidence)
 
                 except (json.JSONDecodeError, TypeError, KeyError, AttributeError):
-                    # Malformed LLM output: treat as a failed semantic evaluation
+                    # Malformed LLM output: INCONCLUSIVE -- do not penalize provider
                     return _build_verdict(
-                        False, "Semantic", "Medium", 0,
+                        False, "Inconclusive", "None", 0,
                         "LLM returned malformed or unparseable output",
                         "LLM response could not be decoded as valid JSON verdict"
                     )
                 except Exception as le:
                     return _build_verdict(
-                        False, "Semantic", "Medium", 0,
+                        False, "Inconclusive", "None", 0,
                         f"LLM prompt execution error: {str(le)}",
                         "Exception raised during LLM prompt execution"
                     )
@@ -347,10 +381,11 @@ class OmniSLA(gl.Contract):
             except Exception:
                 return False
 
-            # Compare the deterministic fields of the structured verdict
+            # Compare deterministic fields using category buckets
+            # for flexible semantic equivalence
             return (
                 bool(leader_verdict.get("condition_satisfied")) == bool(my_verdict.get("condition_satisfied")) and
-                str(leader_verdict.get("failure_category")) == str(my_verdict.get("failure_category")) and
+                _category_bucket(str(leader_verdict.get("failure_category"))) == _category_bucket(str(my_verdict.get("failure_category"))) and
                 str(leader_verdict.get("severity")) == str(my_verdict.get("severity"))
             )
 
@@ -362,10 +397,16 @@ class OmniSLA(gl.Contract):
 
         verdict_dict = json.loads(verdict_str)
         is_satisfied = bool(verdict_dict.get("condition_satisfied", False))
+        category = str(verdict_dict.get("failure_category", ""))
 
         if is_satisfied:
             self.successful_checks = u256(int(self.successful_checks) + 1)
             self.consecutive_failures = u256(0)
+        elif category == "Inconclusive":
+            # Inconclusive verdicts do not count toward slashing.
+            # The check is recorded (total_checks) but neither
+            # successful_checks nor failed_checks is incremented.
+            pass
         else:
             self.failed_checks = u256(int(self.failed_checks) + 1)
             self.consecutive_failures = u256(int(self.consecutive_failures) + 1)
@@ -386,9 +427,8 @@ class OmniSLA(gl.Contract):
         if self.status != "Active":
             raise gl.vm.UserError("SLA is not Active")
 
-        current_time = datetime.fromisoformat(gl.message_raw['datetime'])
-        end_time = datetime.fromisoformat(self.sla_end_time_iso)
-        if current_time < end_time:
+        curr_ts = _iso_to_timestamp(gl.message_raw['datetime'])
+        if curr_ts < int(self.sla_end_timestamp):
             raise gl.vm.UserError("SLA duration has not ended yet")
 
         self.status = "Closed"
