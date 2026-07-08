@@ -43,7 +43,8 @@ export default async function main(client: GenLayerClient<any>) {
     const premium = BigInt(process.env.PREMIUM_REQUIRED || "500");
     const strategy = process.env.VALIDATION_STRATEGY || "contains";
     const rule = process.env.VALIDATION_RULE || "Operational";
-    const maxViolations = Number(process.env.MAX_ALLOWED_VIOLATIONS || "3");
+    const maxConsecutiveFailures = BigInt(process.env.MAX_CONSECUTIVE_FAILURES || process.env.MAX_ALLOWED_VIOLATIONS || "3");
+    const checkIntervalSeconds = BigInt(process.env.CHECK_INTERVAL_SECONDS || "60");
     const endTimeIso = process.env.SLA_END_TIME_ISO || "2026-12-31T23:59:59Z";
 
     console.log(`Deploying OmniSLA with arguments:`);
@@ -54,7 +55,8 @@ export default async function main(client: GenLayerClient<any>) {
     console.log(`  Premium Required: ${premium}`);
     console.log(`  Validation Strategy: ${strategy}`);
     console.log(`  Validation Rule: ${rule}`);
-    console.log(`  Max Allowed Violations: ${maxViolations}`);
+    console.log(`  Max Consecutive Failures: ${maxConsecutiveFailures}`);
+    console.log(`  Check Interval Seconds: ${checkIntervalSeconds}`);
     console.log(`  SLA End Time ISO: ${endTimeIso}`);
 
     const deployTransaction = await activeClient.deployContract({
@@ -67,10 +69,12 @@ export default async function main(client: GenLayerClient<any>) {
         premium,
         strategy,
         rule,
-        maxViolations,
+        maxConsecutiveFailures,
+        checkIntervalSeconds,
         endTimeIso
       ],
     });
+
 
     const receipt = await activeClient.waitForTransactionReceipt({
       hash: deployTransaction as TransactionHash,
